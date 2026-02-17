@@ -12,6 +12,7 @@ from typing import Optional
 import pandas as pd
 
 from src.core.indicators import calculate_value_score, get_score_label
+from src.utils.formatter import fmt_market_cap
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +55,7 @@ def _fmt_float(value: Optional[float], decimals: int = 1) -> str:
 
 
 def _fmt_market_cap(cap: Optional[float], currency: Optional[str]) -> str:
-    if cap is None:
-        return "-"
-    if currency == "JPY":
-        return f"¥{cap / 1e8:.0f}億"
-    return f"${cap / 1e9:.1f}B"
+    return fmt_market_cap(cap, currency)
 
 
 def results_to_dataframe(results: list[ScreenResult]) -> pd.DataFrame:
