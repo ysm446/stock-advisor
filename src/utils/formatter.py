@@ -21,7 +21,13 @@ def fmt_market_cap(cap: Optional[float], currency: Optional[str] = None) -> str:
     if cap is None:
         return "-"
     if currency == "JPY":
-        return f"¥{cap / 1e8:.0f}億"
+        cho = int(cap // 1e12)
+        oku = int((cap % 1e12) // 1e8)
+        if cho > 0 and oku > 0:
+            return f"¥{cho}兆{oku}億"
+        if cho > 0:
+            return f"¥{cho}兆"
+        return f"¥{oku}億"
     if cap >= 1e12:
         return f"${cap / 1e12:.1f}T"
     if cap >= 1e9:

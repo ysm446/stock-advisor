@@ -692,6 +692,139 @@ Phase 6: テスト・リファクタ
 
 ---
 
+## 実装済み状況 (Phase 1 完了)
+
+### 完了ファイル
+
+```
+app.py                          # Gradio エントリーポイント
+start.bat                       # Windows 起動用バッチ (Python フルパス指定)
+config/presets.yaml             # 7 プリセット定義
+config/exchanges.yaml           # 10 地域定義
+config/scenarios.yaml           # 8 シナリオ定義
+src/data/cache_manager.py       # JSON キャッシュ (24h TTL)
+src/data/yahoo_client.py        # yfinance 1.x ラッパー
+src/data/llm_client.py          # Ollama クライアント
+src/core/indicators.py          # バリュースコア計算
+src/core/screener.py            # QueryScreener / ValueScreener
+src/ui/components.py            # 共通 UI
+src/ui/screening_tab.py         # スクリーニングタブ (実装済み)
+src/ui/report_tab.py            # 銘柄レポートタブ (Phase 2 スタブ)
+src/ui/portfolio_tab.py         # ポートフォリオタブ (Phase 3 スタブ)
+src/ui/stress_test_tab.py       # ストレステストタブ (Phase 4 スタブ)
+src/ui/chat_tab.py              # AI アシスタントタブ (Phase 5 スタブ)
+src/utils/formatter.py          # フォーマッタ
+src/utils/validators.py         # バリデータ
+tests/conftest.py               # pytest フィクスチャ
+```
+
+### 起動方法
+
+```bat
+:: Windows
+start.bat
+
+:: コマンドライン
+set PYTHONIOENCODING=utf-8
+D:\miniconda3\conda_envs\main\python.exe app.py
+```
+
+---
+
+## 開発環境 (実機情報)
+
+| 項目 | 値 |
+|------|-----|
+| OS | Windows 11 Pro |
+| conda 環境 | `main` |
+| Python パス | `D:\miniconda3\conda_envs\main\python.exe` |
+| スクリプト実行 | `PYTHONIOENCODING=utf-8 /d/miniconda3/conda_envs/main/python.exe script.py` |
+| yfinance | 1.2.0 |
+| Gradio | 6.x |
+| GPU | RTX PRO 5000 (48GB VRAM) |
+
+---
+
+## 既知の注意点 — yfinance 1.x への移行 (重要)
+
+yfinance **1.x** は 0.2.x から API が大幅変更。以下を必ず守ること。
+
+### Screener API
+
+```python
+# NG (0.2.x スタイル — 廃止)
+from yfinance import Screener
+s = Screener()
+s.set_body({...})
+
+# OK (1.x スタイル)
+import yfinance as yf
+from yfinance import EquityQuery
+resp = yf.screen(query, size=100, sortField="intradaymarketcap", sortAsc=False)
+quotes = resp.get("quotes", [])
+```
+
+### EquityQuery フィールド名
+
+| 条件 | 旧 (0.2.x) | 新 (1.x) |
+|------|-----------|---------|
+| PER フィルタ | `peratio.lasttwelvemonths` (lt) | `peratio.lasttwelvemonths` (btwn [0, max]) |
+| PBR フィルタ | `pricetobook.lasttwelvemonths` | `pricebookratio.quarterly` |
+| 配当利回り | `dividendyield.lasttwelvemonths` (単位: 小数) | `forward_dividend_yield` (単位: %) |
+| 地域指定 | `set_body` の `region` パラメータ | `EquityQuery('eq', ['region', 'jp'])` をクエリに含める |
+| 時価総額 | `intradaymarketcap` | `intradaymarketcap` (変更なし) |
+
+> PER は `btwn [0, max]` を使うこと。`lt` だと負の PER (赤字企業) も通ってしまう。
+
+### 有効なフィールド一覧 (EQUITY_SCREENER_FIELDS より)
+
+```
+price:        intradaymarketcap, intradayprice, percentchange, ...
+valuation:    peratio.lasttwelvemonths, pricebookratio.quarterly, pegratio_5y, ...
+profitability: returnonequity.lasttwelvemonths, returnonassets.lasttwelvemonths,
+               forward_dividend_yield, consecutive_years_of_dividend_growth_count, ...
+income_stmt:  totalrevenues1yrgrowth.lasttwelvemonths, epsgrowth.lasttwelvemonths,
+              ebitdamargin.lasttwelvemonths, netincomemargin.lasttwelvemonths, ...
+eq_fields:    region, exchange, sector, industry, peer_group  (EQ/IS-IN のみ)
+```
+
+### 日本語銘柄名の取得
+
+Yahoo Finance の通常 API は英語名のみ。日本語名は専用エンドポイントで取得:
+
+```python
+# src/data/yahoo_client.py の get_localized_names() を使用
+# Yahoo Finance v7 API に lang=ja-JP を指定すると longName が日本語で返る
+resp = session.get(
+    url="https://query2.finance.yahoo.com/v7/finance/quote",
+    params={"symbols": "7203.T,9984.T", "lang": "ja-JP", "region": "JP", ...}
+)
+# result: {"7203.T": "トヨタ自動車", "9984.T": "ソフトバンクグループ"}
+```
+
+地域ごとの locale_map (screener.py に実装済み):
+- `japan` → `lang=ja-JP, region=JP`
+- `china` → `lang=zh-TW, region=HK`
+- `korea` → `lang=ko-KR, region=KR`
+
+### Gradio 6.x の変更点
+
+```python
+# NG: theme/css は Blocks() に渡せない (Gradio 6 で廃止)
+with gr.Blocks(theme=gr.themes.Soft(), css="..."):
+
+# OK: launch() に渡す
+app.launch(theme=gr.themes.Soft())
+```
+
+### Windows バッチファイルの注意点
+
+- `.bat` ファイルに日本語を含めると文字化けしてコマンドが壊れる → **英語のみで記述**
+- `conda activate` はバッチから直接呼べない → **Python のフルパスを直接指定**
+- 文字化け防止: `PYTHONIOENCODING=utf-8` を set してから実行
+
+---
+
 ## 注意事項
 
 **投資は自己責任です。** 本システムの出力は投資助言ではありません。実際の投資判断は、本システムの出力を参考情報の一つとして、ご自身の判断で行ってください。
