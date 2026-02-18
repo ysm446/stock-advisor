@@ -265,20 +265,22 @@ class ReportGenerator:
 
         return "\n".join(lines)
 
-    def format_columns(self, data: dict) -> tuple[str, str]:
-        """Format report dict as two Markdown strings for a two-column layout.
+    def format_columns(self, data: dict) -> tuple[str, str, str]:
+        """Format report dict as three Markdown strings for a three-column layout.
 
         Returns:
-            (left_md, right_md) where:
+            (left_md, mid_md, right_md) where:
               left  — header, 基本情報, バリュエーション, 財務サマリー, 収益性
-              right — バリュースコア, アナリストコンセンサス, AI分析, ニュース
+              mid   — バリュースコア, アナリストコンセンサス
+              right — AI アシスタントの分析, 最新ニュース
         """
         if data.get("error"):
             err = f"## エラー\n\n{data['error']}"
-            return err, ""
+            return err, "", ""
 
         currency = data.get("currency")
         left: list[str] = []
+        mid: list[str] = []
         right: list[str] = []
 
         # --- ヘッダー (左) ---
@@ -348,19 +350,19 @@ class ReportGenerator:
         left.append(markdown_table(["指標", "値"], prof_rows))
         left.append("")
 
-        # --- バリュースコア (右) ---
+        # --- バリュースコア (中央) ---
         score = data.get("value_score", 0.0)
         label = data.get("score_label", "-")
-        right.append("### バリュースコア")
-        right.append(f"**{score:.1f} / 100** — {label}")
-        right.append("")
-        right.append(_score_bar(score))
-        right.append("")
+        mid.append("### バリュースコア")
+        mid.append(f"**{score:.1f} / 100** — {label}")
+        mid.append("")
+        mid.append(_score_bar(score))
+        mid.append("")
 
-        # --- アナリストコンセンサス (右) ---
+        # --- アナリストコンセンサス (中央) ---
         analyst = data.get("analyst", {})
         if any(v is not None for v in analyst.values()):
-            right.append("### アナリストコンセンサス")
+            mid.append("### アナリストコンセンサス")
             rec_key = analyst.get("recommendation") or ""
             rec_label = _REC_LABELS.get(rec_key, rec_key or "-")
             count = analyst.get("analyst_count")
@@ -372,8 +374,8 @@ class ReportGenerator:
                 ["レーティング", rec_label],
                 ["アナリスト数", count_str],
             ]
-            right.append(markdown_table(["項目", "値"], ana_rows))
-            right.append("")
+            mid.append(markdown_table(["項目", "値"], ana_rows))
+            mid.append("")
 
         # --- AI 分析 (右) ---
         llm = data.get("llm_analysis", "")
@@ -398,7 +400,7 @@ class ReportGenerator:
                     right.append(f"- {title}　_{publisher}_")
             right.append("")
 
-        return "\n".join(left), "\n".join(right)
+        return "\n".join(left), "\n".join(mid), "\n".join(right)
 
 
 def _score_bar(score: float, width: int = 20) -> str:
