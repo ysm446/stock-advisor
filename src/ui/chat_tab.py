@@ -189,20 +189,22 @@ def build_chat_tab(yahoo_client, llm_client) -> None:
     def respond(message: str, history: list, llm_history: list):
         message = message.strip()
         if not message:
-            return "", history, llm_history
+            yield "", history, llm_history
+            return
 
         # Check LLM availability on each turn
         if not llm_client.is_available():
             reply = (
-                "**LLM 未接続**\n\n"
-                "Ollama が起動していません。`ollama serve` を実行してから「接続確認」ボタンを押してください。\n\n"
-                "Ollama なしでも、銘柄レポートタブ・スクリーニングタブなど定量分析機能は引き続きご利用いただけます。"
+                "**モデル未読み込み**\n\n"
+                "「モデル管理」タブでモデルを読み込んでください。\n\n"
+                "モデルなしでも、銘柄レポートタブ・スクリーニングタブなど定量分析機能は引き続きご利用いただけます。"
             )
             history = list(history) + [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": reply},
             ]
-            return "", history, llm_history
+            yield "", history, llm_history
+            return
 
         # Build context from the current message
         context = _build_context(message, yahoo_client, manager)
@@ -217,21 +219,27 @@ def build_chat_tab(yahoo_client, llm_client) -> None:
         if len(llm_history) > _MAX_HISTORY_TURNS * 2:
             llm_history = llm_history[-(_MAX_HISTORY_TURNS * 2):]
 
-        # Call LLM
-        reply = llm_client.chat(llm_history, system=system_prompt)
-        if not reply:
-            reply = "LLM からの応答が取得できませんでした。時間をおいて再度お試しください。"
-
-        # Append assistant reply to LLM history
-        llm_history = llm_history + [{"role": "assistant", "content": reply}]
-
-        # Update chatbot display
-        history = list(history) + [
+        # Show user message immediately with empty assistant placeholder
+        display_history = list(history) + [
             {"role": "user", "content": message},
-            {"role": "assistant", "content": reply},
+            {"role": "assistant", "content": "▋"},
         ]
+        yield "", display_history, llm_history
 
-        return "", history, llm_history
+        # Stream response token by token
+        reply = ""
+        for chunk in llm_client.stream_chat(llm_history, system=system_prompt):
+            reply = chunk
+            display_history[-1] = {"role": "assistant", "content": reply + "▋"}
+            yield "", display_history, llm_history
+
+        if not reply:
+            reply = "応答が取得できませんでした。時間をおいて再度お試しください。"
+
+        # Final update: remove cursor, store complete reply in LLM history
+        display_history[-1] = {"role": "assistant", "content": reply}
+        llm_history = llm_history + [{"role": "assistant", "content": reply}]
+        yield "", display_history, llm_history
 
     send_btn.click(
         respond,

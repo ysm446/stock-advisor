@@ -1,5 +1,6 @@
 """Stock Advisor — Gradio web application entry point."""
 import logging
+import threading
 from pathlib import Path
 
 import gradio as gr
@@ -9,6 +10,7 @@ from src.data.cache_manager import CacheManager
 from src.data.llm_client import LLMClient
 from src.data.yahoo_client import YahooClient
 from src.ui.chat_tab import build_chat_tab
+from src.ui.model_tab import build_model_tab
 from src.ui.portfolio_tab import build_portfolio_tab
 from src.ui.report_tab import build_report_tab
 from src.ui.screening_tab import build_screening_tab
@@ -95,15 +97,27 @@ def build_app() -> gr.Blocks:
 
     cache = CacheManager(cache_dir=str(BASE_DIR / "data" / "cache"))
     yahoo = YahooClient(cache_manager=cache)
-    llm = LLMClient(model="qwen3:8b")
+    llm = LLMClient(
+        model_id="Qwen/Qwen3-8B",
+        cache_dir=str(BASE_DIR / "models"),
+        load_on_init=False,
+        persist_file=str(BASE_DIR / "data" / "last_model.json"),
+    )
 
-    llm_status = "LLM 接続中" if llm.is_available() else "LLM 未接続"
-    logger.info("LLM status: %s (model=%s)", llm_status, llm.model)
+    # Auto-load the last used model in the background
+    last_model_id = llm.get_last_persisted_model()
+    if last_model_id:
+        logger.info("Auto-loading last used model: %s", last_model_id)
+        threading.Thread(
+            target=llm.load_model, args=(last_model_id,), daemon=True
+        ).start()
+    else:
+        logger.info("No persisted model found — load a model from the モデル管理 tab.")
 
     with gr.Blocks(title="Stock Advisor") as app:
         gr.Markdown("# Stock Advisor")
         gr.Markdown(
-            f"{llm_status} | "
+            "**モデル管理タブでモデルを読み込んでから各機能をご利用ください。** | "
             "**投資は自己責任です。本システムの出力は投資助言ではありません。**"
         )
 
@@ -122,6 +136,9 @@ def build_app() -> gr.Blocks:
 
             with gr.Tab("AI アシスタント"):
                 build_chat_tab(yahoo, llm)
+
+            with gr.Tab("モデル管理"):
+                build_model_tab(llm)
 
     return app
 

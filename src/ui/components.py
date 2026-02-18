@@ -3,10 +3,10 @@ import gradio as gr
 
 
 def llm_status_badge(is_available: bool) -> str:
-    """Return a Markdown badge string indicating LLM connection status."""
+    """Return a Markdown badge string indicating LLM model load status."""
     if is_available:
-        return "**LLM 接続中**"
-    return "**LLM 未接続** — Ollama が起動していません。`ollama serve` を実行してください。"
+        return "**モデル読み込み済**"
+    return "**モデル未読み込み** — 「モデル管理」タブでモデルを読み込んでください。"
 
 
 def error_markdown(message: str) -> str:

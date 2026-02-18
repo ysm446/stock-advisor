@@ -87,11 +87,14 @@ class ReportGenerator:
         self.yahoo = yahoo_client
         self.llm = llm_client
 
-    def generate(self, ticker: str) -> dict:
+    def generate(self, ticker: str, skip_llm: bool = False) -> dict:
         """Fetch data and build a structured report dict.
 
         Args:
             ticker: Ticker symbol (e.g. "7203.T", "AAPL").
+            skip_llm: If True, skip the LLM analysis call (for streaming UI).
+                      The returned dict will include "llm_stock_input" for
+                      the caller to use with stream_analyze_stock().
 
         Returns:
             Report dict. On critical failure, returns dict with "error" key set.
@@ -110,27 +113,29 @@ class ReportGenerator:
         value_score = calculate_value_score(info)
         score_label = get_score_label(value_score)
 
-        # LLM analysis — only pass lightweight numeric data to reduce token usage
+        # Build the lightweight data dict passed to LLM
+        llm_stock_input = {
+            "ticker": ticker,
+            "name": info.get("longName") or info.get("shortName") or ticker,
+            "sector": info.get("sector"),
+            "per": info.get("trailingPE") or info.get("forwardPE"),
+            "pbr": info.get("priceToBook"),
+            "dividend_yield_pct": ((info.get("dividendYield") or info.get("trailingAnnualDividendYield") or 0) * 100),
+            "roe_pct": (info.get("returnOnEquity") or 0) * 100,
+            "revenue_growth_pct": (info.get("revenueGrowth") or 0) * 100,
+            "value_score": value_score,
+            "score_label": score_label,
+            "analyst_recommendation": analyst.get("recommendation"),
+            "analyst_count": analyst.get("analyst_count"),
+            "target_mean": analyst.get("target_mean"),
+            "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+        }
+
+        # LLM analysis — skipped when skip_llm=True (caller streams it separately)
         llm_analysis = ""
-        if self.llm and self.llm.is_available():
-            stock_data = {
-                "ticker": ticker,
-                "name": info.get("longName") or info.get("shortName") or ticker,
-                "sector": info.get("sector"),
-                "per": info.get("trailingPE") or info.get("forwardPE"),
-                "pbr": info.get("priceToBook"),
-                "dividend_yield_pct": ((info.get("dividendYield") or info.get("trailingAnnualDividendYield") or 0) * 100),
-                "roe_pct": (info.get("returnOnEquity") or 0) * 100,
-                "revenue_growth_pct": (info.get("revenueGrowth") or 0) * 100,
-                "value_score": value_score,
-                "score_label": score_label,
-                "analyst_recommendation": analyst.get("recommendation"),
-                "analyst_count": analyst.get("analyst_count"),
-                "target_mean": analyst.get("target_mean"),
-                "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
-            }
+        if not skip_llm and self.llm and self.llm.is_available():
             try:
-                llm_analysis = self.llm.analyze_stock(stock_data) or ""
+                llm_analysis = self.llm.analyze_stock(llm_stock_input) or ""
             except Exception as e:
                 logger.warning("LLM analysis failed: %s", e)
 
@@ -178,6 +183,7 @@ class ReportGenerator:
             "news": news[:5],
             # LLM
             "llm_analysis": llm_analysis,
+            "llm_stock_input": llm_stock_input,  # for streaming callers
             # No error
             "error": None,
         }

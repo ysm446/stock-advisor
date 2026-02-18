@@ -14,6 +14,11 @@ _BARE_JP_NUMBER_RE = re.compile(r"^\d{4,5}$")
 # Unicode ranges covering Hiragana, Katakana, and CJK Unified Ideographs
 _JAPANESE_RE = re.compile(r"[\u3040-\u9fff]")
 
+_AI_HEADER = (
+    "### AI アシスタントの分析\n"
+    "> *以下は AI による情報提供です。投資助言ではありません。*\n\n"
+)
+
 
 def _looks_like_ticker(text: str) -> bool:
     """Return True if text appears to be a ticker symbol rather than a company name."""
@@ -112,7 +117,7 @@ def build_report_tab(yahoo_client, llm_client) -> None:
                         translation_note = f" (英語名: {english_name})"
                 else:
                     yield gr.update(visible=False), (
-                        f"「{query}」は日本語の会社名のようですが、LLM が未接続のため英語変換できません。"
+                        f"「{query}」は日本語の会社名のようですが、LLM が未読み込みのため英語変換できません。"
                         "ティッカー記号 (例: 7011.T) を直接入力してください。"
                     ), "", ""
                     return
@@ -139,9 +144,41 @@ def build_report_tab(yahoo_client, llm_client) -> None:
             resolved_note = gr.update(value="\n\n".join(note_lines), visible=True)
             yield resolved_note, "データを取得中...", "", ""
 
-        data = generator.generate(ticker)
+        # Generate report data without LLM (stream AI analysis into right column)
+        data = generator.generate(ticker, skip_llm=True)
         left_md, mid_md, right_md = generator.format_columns(data)
+
+        if data.get("error"):
+            yield gr.update(visible=False), left_md, "", ""
+            return
+
+        # Show static report first; right column starts with news only
         yield resolved_note, left_md, mid_md, right_md
+
+        # Stream AI analysis into the right column (above news)
+        if not llm_client.is_available():
+            return
+
+        llm_input = data.get("llm_stock_input")
+        if not llm_input:
+            return
+
+        # Separator between AI analysis and news
+        news_section = ("\n\n---\n\n" + right_md) if right_md.strip() else ""
+
+        accumulated = ""
+        for chunk in llm_client.stream_analyze_stock(llm_input):
+            accumulated = chunk
+            # Use gr.update() for unchanged columns to avoid unnecessary re-renders
+            yield (
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                _AI_HEADER + accumulated + "▋" + news_section,
+            )
+
+        if accumulated:
+            yield gr.update(), gr.update(), gr.update(), _AI_HEADER + accumulated + news_section
 
     run_btn.click(
         on_run,

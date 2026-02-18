@@ -9,8 +9,14 @@ gradio>=5.0.0
 # Config
 pyyaml>=6.0
 
-# LLM
-requests>=2.31.0
+# LLM — Hugging Face Transformers (replaces Ollama)
+transformers>=4.51.0
+torch>=2.3.0
+accelerate>=0.30.0
+huggingface_hub>=0.23.0
+
+# NOTE: CUDA 対応 torch は別途インストール:
+# pip install torch --index-url https://download.pytorch.org/whl/cu124
 
 # Testing
 pytest>=7.0.0
