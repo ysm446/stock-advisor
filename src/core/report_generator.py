@@ -241,7 +241,11 @@ class ReportGenerator:
                 if val is None:
                     return "-"
                 if currency == "JPY":
+                    if abs(val) >= 1e12:
+                        return f"¥{val / 1e12:.2f}兆"
                     return f"¥{val / 1e8:.0f}億"
+                if abs(val) >= 1e12:
+                    return f"${val / 1e12:.2f}T"
                 return f"${val / 1e9:.2f}B"
 
             fin_headers = ["期間"] + dates
@@ -395,7 +399,11 @@ class ReportGenerator:
                 if val is None:
                     return "-"
                 if currency == "JPY":
+                    if abs(val) >= 1e12:
+                        return f"¥{val / 1e12:.2f}兆"
                     return f"¥{val / 1e8:.0f}億"
+                if abs(val) >= 1e12:
+                    return f"${val / 1e12:.2f}T"
                 return f"${val / 1e9:.2f}B"
 
             def _fin_color(series: dict, date: str, prev_date: Optional[str]) -> Optional[bool]:
