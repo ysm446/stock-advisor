@@ -8,6 +8,8 @@ from src.utils.formatter import (
     fmt_market_cap,
     fmt_pct,
     fmt_price,
+    localize_industry,
+    localize_sector,
     markdown_table,
 )
 
@@ -75,6 +77,27 @@ def _eval_target_vs_price(target_mean: Optional[float],
     return None
 
 
+def _html_table(headers: list[str], rows: list[list]) -> str:
+    """Build an HTML table string (cell values may contain HTML from _colored)."""
+    th_cells = "".join(f"<th>{h}</th>" for h in headers)
+    tbody_rows = "".join(
+        "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+        for row in rows
+    )
+    return (
+        f'<table class="rpt-tbl">'
+        f"<thead><tr>{th_cells}</tr></thead>"
+        f"<tbody>{tbody_rows}</tbody>"
+        f"</table>"
+    )
+
+
+def _html_section(title: str, table_html: str, wide: bool = False) -> str:
+    """Wrap an HTML table in a labelled section card for the report flex grid."""
+    css_class = "rpt-card rpt-wide" if wide else "rpt-card"
+    return f'<div class="{css_class}"><h3 class="rpt-h3">{title}</h3>{table_html}</div>'
+
+
 class ReportGenerator:
     """Generate individual stock reports combining fundamental data and LLM analysis."""
 
@@ -110,6 +133,12 @@ class ReportGenerator:
         analyst = self.yahoo.get_analyst_data(ticker)
         news = self.yahoo.get_news(ticker)
 
+        # Prefer Japanese name for Tokyo Stock Exchange tickers
+        display_name = info.get("longName") or info.get("shortName") or ticker
+        if ticker.endswith(".T"):
+            localized = self.yahoo.get_localized_names([ticker], lang="ja-JP", region="JP")
+            display_name = localized.get(ticker) or display_name
+
         currency = info.get("currency")
         value_score = calculate_value_score(info)
         score_label = get_score_label(value_score)
@@ -135,7 +164,7 @@ class ReportGenerator:
         # Build the lightweight data dict passed to LLM
         llm_stock_input = {
             "ticker": ticker,
-            "name": info.get("longName") or info.get("shortName") or ticker,
+            "name": display_name,
             "sector": info.get("sector"),
             "per": info.get("trailingPE") or info.get("forwardPE"),
             "pbr": info.get("priceToBook"),
@@ -160,9 +189,9 @@ class ReportGenerator:
 
         return {
             "ticker": ticker,
-            "name": info.get("longName") or info.get("shortName") or ticker,
-            "sector": info.get("sector") or "-",
-            "industry": info.get("industry") or "-",
+            "name": display_name,
+            "sector": localize_sector(info.get("sector")),
+            "industry": localize_industry(info.get("industry")),
             "currency": currency,
             "market_cap": info.get("marketCap"),
             "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
@@ -531,6 +560,358 @@ class ReportGenerator:
             right.append("")
 
         return "\n".join(left), "\n".join(mid), "\n".join(right)
+
+    def format_two_columns(self, data: dict) -> tuple[str, str]:
+        """Format report dict for a two-column layout.
+
+        Returns:
+            (left_html, right_md) where:
+              left  — HTML: header + flex-wrap grid of section cards
+                      (基本情報, バリュエーション, 財務サマリー, 収益性,
+                       アナリストコンセンサス)
+              right — Markdown: バリュースコア + "\\n\\n---\\n\\n" + 最新ニュース
+                      (AI分析はストリーミングで挿入されるため含まない)
+        """
+        if data.get("error"):
+            err = f"## エラー\n\n{data['error']}"
+            return err, ""
+
+        currency = data.get("currency")
+        cards: list[str] = []
+        right: list[str] = []
+
+        # --- ヘッダー (全幅 HTML) ---
+        ticker = data["ticker"]
+        name = data["name"]
+        header_html = (
+            f'<h2 style="margin:0 0 4px">{name}&ensp;'
+            f'<code style="font-size:0.7em">{ticker}</code></h2>'
+            f'<p style="margin:0 0 12px;color:#999">'
+            f'<strong>セクター:</strong> {data["sector"]}'
+            f'&emsp;｜&emsp;<strong>業種:</strong> {data["industry"]}</p>'
+        )
+
+        # --- 基本情報 ---
+        basic_rows = [
+            ["時価総額", fmt_market_cap(data.get("market_cap"), currency)],
+            ["現在株価", fmt_price(data.get("current_price"), currency)],
+            ["52週高値", fmt_price(data.get("week52_high"), currency)],
+            ["52週安値", fmt_price(data.get("week52_low"), currency)],
+        ]
+        cards.append(_html_section("基本情報", _html_table(["項目", "値"], basic_rows)))
+
+        # --- バリュエーション ---
+        per_val = data.get("per")
+        pbr_val = data.get("pbr")
+        ev_val  = data.get("ev_ebitda")
+        dy_val  = data.get("dividend_yield")
+        val_rows = [
+            ["PER (実績)", _colored(
+                fmt_float(per_val, 1) + "倍" if per_val else "-",
+                _eval(per_val, 12, 25, higher_is_good=False),
+            )],
+            ["PBR", _colored(
+                fmt_float(pbr_val, 2) + "倍" if pbr_val else "-",
+                _eval(pbr_val, 1.0, 2.5, higher_is_good=False),
+            )],
+            ["EV/EBITDA", _colored(
+                fmt_float(ev_val, 1) + "倍" if ev_val else "-",
+                _eval(ev_val, 8.0, 15.0, higher_is_good=False),
+            )],
+            ["配当利回り", _colored(
+                fmt_pct(dy_val),
+                _eval(dy_val, 0.03, 0.01, higher_is_good=True),
+            )],
+        ]
+        cards.append(_html_section("バリュエーション", _html_table(["指標", "値"], val_rows)))
+
+        # --- 財務サマリー ---
+        financials = data.get("financials", {})
+        revenue = financials.get("revenue", {})
+        op_income = financials.get("operating_income", {})
+        net_income = financials.get("net_income", {})
+
+        if revenue:
+            dates = sorted(revenue.keys(), reverse=True)[:3]
+
+            def _fmt_fin(val: Optional[float]) -> str:
+                if val is None:
+                    return "-"
+                if currency == "JPY":
+                    if abs(val) >= 1e12:
+                        return f"¥{val / 1e12:.2f}兆"
+                    return f"¥{val / 1e8:.0f}億"
+                if abs(val) >= 1e12:
+                    return f"${val / 1e12:.2f}T"
+                return f"${val / 1e9:.2f}B"
+
+            def _fin_color(series: dict, date: str, prev_date: Optional[str]) -> Optional[bool]:
+                if prev_date is None:
+                    return None
+                cur = series.get(date)
+                prv = series.get(prev_date)
+                if cur is None or prv is None or prv == 0:
+                    return None
+                return True if cur > prv else False
+
+            fin_headers = ["期間"] + dates
+            fin_rows = [
+                ["売上高"] + [
+                    _colored(_fmt_fin(revenue.get(d)),
+                             _fin_color(revenue, d, dates[i + 1] if i + 1 < len(dates) else None))
+                    for i, d in enumerate(dates)
+                ],
+                ["営業利益"] + [
+                    _colored(_fmt_fin(op_income.get(d)),
+                             _fin_color(op_income, d, dates[i + 1] if i + 1 < len(dates) else None))
+                    for i, d in enumerate(dates)
+                ],
+                ["純利益"] + [
+                    _colored(_fmt_fin(net_income.get(d)),
+                             _fin_color(net_income, d, dates[i + 1] if i + 1 < len(dates) else None))
+                    for i, d in enumerate(dates)
+                ],
+            ]
+            cards.append(_html_section("財務サマリー", _html_table(fin_headers, fin_rows), wide=True))
+
+        # --- 収益性 ---
+        prof_rows = [
+            ["ROE", _colored(fmt_pct(data.get("roe")),
+                             _eval(data.get("roe"), 0.15, 0.05))],
+            ["ROA", _colored(fmt_pct(data.get("roa")),
+                             _eval(data.get("roa"), 0.05, 0.02))],
+            ["営業利益率", _colored(fmt_pct(data.get("operating_margin")),
+                                   _eval(data.get("operating_margin"), 0.15, 0.05))],
+            ["FCF マージン", _colored(fmt_pct(data.get("fcf_margin")),
+                                     _eval(data.get("fcf_margin"), 0.10, 0.0))],
+        ]
+        cards.append(_html_section("収益性", _html_table(["指標", "値"], prof_rows)))
+
+        # --- アナリストコンセンサス ---
+        analyst = data.get("analyst", {})
+        if any(v is not None for v in analyst.values()):
+            rec_key = analyst.get("recommendation") or ""
+            rec_label = _REC_LABELS.get(rec_key, rec_key or "-")
+            count = analyst.get("analyst_count")
+            count_str = f"{count}名" if count else "-"
+            current_price = data.get("current_price")
+            target_color = _eval_target_vs_price(analyst.get("target_mean"), current_price)
+            ana_rows = [
+                ["目標株価 (高値)", fmt_price(analyst.get("target_high"), currency)],
+                ["目標株価 (平均)", _colored(fmt_price(analyst.get("target_mean"), currency),
+                                            target_color)],
+                ["目標株価 (安値)", fmt_price(analyst.get("target_low"), currency)],
+                ["レーティング", _colored(rec_label, _eval_rec(rec_key))],
+                ["アナリスト数", count_str],
+            ]
+            cards.append(_html_section("アナリストコンセンサス", _html_table(["項目", "値"], ana_rows)))
+
+        left_html = header_html + '<div class="rpt-cards">' + "".join(cards) + "</div>"
+
+        # --- バリュースコア (右・Markdown) ---
+        score = data.get("value_score", 0.0)
+        label = data.get("score_label", "-")
+        right.append("### バリュースコア")
+        right.append(f"**{score:.1f} / 100** — {label}")
+        right.append("")
+        right.append(_score_bar(score))
+        right.append("")
+
+        # --- セパレータ ---
+        right.append("---")
+        right.append("")
+
+        # --- 最新ニュース (右・Markdown) ---
+        news = data.get("news", [])
+        if news:
+            right.append("### 最新ニュース")
+            for n in news:
+                title = n.get("title") or ""
+                link = n.get("link") or ""
+                publisher = n.get("publisher") or ""
+                if link:
+                    right.append(f"- [{title}]({link})　_{publisher}_")
+                else:
+                    right.append(f"- {title}　_{publisher}_")
+            right.append("")
+
+        return left_html, "\n".join(right)
+
+    def format_report_html(self, data: dict) -> str:
+        """Format report dict as a single full-page HTML string.
+
+        Structure:
+          - Header: company name (left) + バリュースコア (right, inline)
+          - Financial cards: flex-wrap grid (基本情報, バリュエーション,
+            財務サマリー, 収益性, アナリストコンセンサス)
+          - News: simple list at the bottom
+          AI analysis is streamed separately into a dedicated component.
+        """
+        if data.get("error"):
+            return f"<p><strong>エラー:</strong> {data['error']}</p>"
+
+        currency = data.get("currency")
+
+        # --- バリュースコア ---
+        score = data.get("value_score", 0.0)
+        label = data.get("score_label", "-")
+        filled = int(round(score / 100 * 20))
+        bar = "█" * filled + "░" * (20 - filled)
+        score_color = (
+            "#67e8f9" if score >= 60 else ("#f97316" if score < 40 else "#e0e0e0")
+        )
+
+        # --- ヘッダー (タイトル左 + スコア右) ---
+        ticker = data["ticker"]
+        name = data["name"]
+        header_html = (
+            f'<div style="display:flex;justify-content:space-between;'
+            f'align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:12px">'
+            f'<div>'
+            f'<h2 style="margin:0 0 4px">{name}&ensp;'
+            f'<code style="font-size:0.7em">{ticker}</code></h2>'
+            f'<p style="margin:0;color:#999">'
+            f'<strong>セクター:</strong> {data["sector"]}'
+            f'&emsp;｜&emsp;<strong>業種:</strong> {data["industry"]}'
+            f'</p></div>'
+            f'<div style="text-align:right;white-space:nowrap">'
+            f'<div style="font-size:1.1em;font-weight:700;color:{score_color}">'
+            f'{score:.1f} / 100&ensp;'
+            f'<span style="font-weight:normal;font-size:0.85em">{label}</span>'
+            f'</div>'
+            f'<div><code style="font-size:0.75em">{bar}</code></div>'
+            f'</div>'
+            f'</div>'
+        )
+
+        # --- 財務カード ---
+        cards: list[str] = []
+
+        # 基本情報
+        basic_rows = [
+            ["時価総額", fmt_market_cap(data.get("market_cap"), currency)],
+            ["現在株価", fmt_price(data.get("current_price"), currency)],
+            ["52週高値", fmt_price(data.get("week52_high"), currency)],
+            ["52週安値", fmt_price(data.get("week52_low"), currency)],
+        ]
+        cards.append(_html_section("基本情報", _html_table(["項目", "値"], basic_rows)))
+
+        # バリュエーション
+        per_val = data.get("per")
+        pbr_val = data.get("pbr")
+        ev_val  = data.get("ev_ebitda")
+        dy_val  = data.get("dividend_yield")
+        val_rows = [
+            ["PER (実績)", _colored(
+                fmt_float(per_val, 1) + "倍" if per_val else "-",
+                _eval(per_val, 12, 25, higher_is_good=False),
+            )],
+            ["PBR", _colored(
+                fmt_float(pbr_val, 2) + "倍" if pbr_val else "-",
+                _eval(pbr_val, 1.0, 2.5, higher_is_good=False),
+            )],
+            ["EV/EBITDA", _colored(
+                fmt_float(ev_val, 1) + "倍" if ev_val else "-",
+                _eval(ev_val, 8.0, 15.0, higher_is_good=False),
+            )],
+            ["配当利回り", _colored(
+                fmt_pct(dy_val),
+                _eval(dy_val, 0.03, 0.01, higher_is_good=True),
+            )],
+        ]
+        cards.append(_html_section("バリュエーション", _html_table(["指標", "値"], val_rows)))
+
+        # 財務サマリー
+        financials = data.get("financials", {})
+        revenue = financials.get("revenue", {})
+        op_income = financials.get("operating_income", {})
+        net_income = financials.get("net_income", {})
+
+        if revenue:
+            dates = sorted(revenue.keys(), reverse=True)[:3]
+
+            def _fmt_fin(val: Optional[float]) -> str:
+                if val is None:
+                    return "-"
+                if currency == "JPY":
+                    if abs(val) >= 1e12:
+                        return f"¥{val / 1e12:.2f}兆"
+                    return f"¥{val / 1e8:.0f}億"
+                if abs(val) >= 1e12:
+                    return f"${val / 1e12:.2f}T"
+                return f"${val / 1e9:.2f}B"
+
+            def _fin_color(series: dict, date: str,
+                           prev_date: Optional[str]) -> Optional[bool]:
+                if prev_date is None:
+                    return None
+                cur, prv = series.get(date), series.get(prev_date)
+                if cur is None or prv is None or prv == 0:
+                    return None
+                return True if cur > prv else False
+
+            fin_headers = ["期間"] + dates
+            fin_rows = [
+                ["売上高"] + [
+                    _colored(_fmt_fin(revenue.get(d)),
+                             _fin_color(revenue, d,
+                                        dates[i + 1] if i + 1 < len(dates) else None))
+                    for i, d in enumerate(dates)
+                ],
+                ["営業利益"] + [
+                    _colored(_fmt_fin(op_income.get(d)),
+                             _fin_color(op_income, d,
+                                        dates[i + 1] if i + 1 < len(dates) else None))
+                    for i, d in enumerate(dates)
+                ],
+                ["純利益"] + [
+                    _colored(_fmt_fin(net_income.get(d)),
+                             _fin_color(net_income, d,
+                                        dates[i + 1] if i + 1 < len(dates) else None))
+                    for i, d in enumerate(dates)
+                ],
+            ]
+            cards.append(
+                _html_section("財務サマリー", _html_table(fin_headers, fin_rows), wide=True)
+            )
+
+        # 収益性
+        prof_rows = [
+            ["ROE", _colored(fmt_pct(data.get("roe")),
+                             _eval(data.get("roe"), 0.15, 0.05))],
+            ["ROA", _colored(fmt_pct(data.get("roa")),
+                             _eval(data.get("roa"), 0.05, 0.02))],
+            ["営業利益率", _colored(fmt_pct(data.get("operating_margin")),
+                                   _eval(data.get("operating_margin"), 0.15, 0.05))],
+            ["FCF マージン", _colored(fmt_pct(data.get("fcf_margin")),
+                                     _eval(data.get("fcf_margin"), 0.10, 0.0))],
+        ]
+        cards.append(_html_section("収益性", _html_table(["指標", "値"], prof_rows)))
+
+        # アナリストコンセンサス
+        analyst = data.get("analyst", {})
+        if any(v is not None for v in analyst.values()):
+            rec_key = analyst.get("recommendation") or ""
+            rec_label = _REC_LABELS.get(rec_key, rec_key or "-")
+            count = analyst.get("analyst_count")
+            count_str = f"{count}名" if count else "-"
+            current_price = data.get("current_price")
+            target_color = _eval_target_vs_price(analyst.get("target_mean"), current_price)
+            ana_rows = [
+                ["目標株価 (高値)", fmt_price(analyst.get("target_high"), currency)],
+                ["目標株価 (平均)", _colored(
+                    fmt_price(analyst.get("target_mean"), currency), target_color)],
+                ["目標株価 (安値)", fmt_price(analyst.get("target_low"), currency)],
+                ["レーティング", _colored(rec_label, _eval_rec(rec_key))],
+                ["アナリスト数", count_str],
+            ]
+            cards.append(
+                _html_section("アナリストコンセンサス", _html_table(["項目", "値"], ana_rows))
+            )
+
+        cards_html = '<div class="rpt-cards">' + "".join(cards) + "</div>"
+
+        return header_html + cards_html
 
 
 def _score_bar(score: float, width: int = 20) -> str:

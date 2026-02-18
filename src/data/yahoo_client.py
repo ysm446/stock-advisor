@@ -1,7 +1,9 @@
 """yfinance wrapper with caching, rate limiting, and data sanitization."""
 import hashlib
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import pandas as pd
@@ -36,17 +38,19 @@ class YahooClient:
         """
         self.cache = cache_manager or CacheManager()
         self._last_call: float = 0.0
+        self._rate_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _rate_limit(self) -> None:
-        """Ensure at least 1 second between API calls."""
-        elapsed = time.time() - self._last_call
-        if elapsed < 1.0:
-            time.sleep(1.0 - elapsed)
-        self._last_call = time.time()
+        """Ensure at least 1 second between API calls (thread-safe)."""
+        with self._rate_lock:
+            elapsed = time.time() - self._last_call
+            if elapsed < 1.0:
+                time.sleep(1.0 - elapsed)
+            self._last_call = time.time()
 
     def _sanitize_info(self, info: dict) -> dict:
         """Normalize and filter unreasonable values from ticker info."""
@@ -71,6 +75,44 @@ class YahooClient:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def _fetch_ticker_info_raw(self, ticker: str) -> dict:
+        """Fetch ticker info without rate limiting (for parallel batch use).
+
+        Results are cached the same way as get_ticker_info().
+        """
+        key = f"info_{ticker}"
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            info = yf.Ticker(ticker).info or {}
+            result = self._sanitize_info(info)
+            self.cache.set(key, result)
+            return result
+        except Exception as e:
+            logger.warning("_fetch_ticker_info_raw(%s) failed: %s", ticker, e)
+            return {}
+
+    def get_ticker_info_batch(self, tickers: list[str], max_workers: int = 8) -> dict[str, dict]:
+        """Fetch ticker info for multiple tickers in parallel.
+
+        Cached results are returned immediately without API calls.
+        Uncached tickers are fetched concurrently (no artificial rate limit).
+
+        Args:
+            tickers: List of ticker symbols.
+            max_workers: Number of parallel threads.
+
+        Returns:
+            Dict mapping ticker → info dict.
+        """
+        def _fetch(ticker: str) -> tuple[str, dict]:
+            return ticker, self._fetch_ticker_info_raw(ticker)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            pairs = list(executor.map(_fetch, tickers))
+        return dict(pairs)
 
     def get_ticker_info(self, ticker: str) -> dict:
         """Get ticker info dict, with 24h caching.

@@ -14,11 +14,6 @@ _BARE_JP_NUMBER_RE = re.compile(r"^\d{4,5}$")
 # Unicode ranges covering Hiragana, Katakana, and CJK Unified Ideographs
 _JAPANESE_RE = re.compile(r"[\u3040-\u9fff]")
 
-_AI_HEADER = (
-    "### AI アシスタントの分析\n"
-    "> *以下は AI による情報提供です。投資助言ではありません。*\n\n"
-)
-
 
 def _looks_like_ticker(text: str) -> bool:
     """Return True if text appears to be a ticker symbol rather than a company name."""
@@ -26,12 +21,7 @@ def _looks_like_ticker(text: str) -> bool:
 
 
 def _normalize_ticker(query: str) -> tuple[str, str]:
-    """Normalize a ticker query, returning (ticker, note).
-
-    If query is a bare 4-5 digit number, append '.T' to treat it as a
-    Tokyo Stock Exchange ticker.  note is a human-readable explanation
-    of the correction, or an empty string when no correction was made.
-    """
+    """Normalize a ticker query, returning (ticker, note)."""
     if _BARE_JP_NUMBER_RE.match(query):
         return query + ".T", f"`{query}` → `{query}.T` (東証ティッカーとして補正)"
     return query.upper(), ""
@@ -43,19 +33,106 @@ def _has_japanese(text: str) -> bool:
 
 
 def _llm_translate_to_english(company_name: str, llm_client) -> str:
-    """Ask LLM to translate a Japanese company name to English for Yahoo Finance search.
-
-    Returns empty string if LLM is unavailable or returns an empty response.
-    """
+    """Ask LLM to translate a Japanese company name to English for Yahoo Finance search."""
     prompt = (
         f"以下の企業名を Yahoo Finance で検索できる英語の正式名称に変換してください。"
         f"企業名のみを出力し、説明や句読点は一切出力しないでください。\n企業名: {company_name}"
     )
     raw = llm_client.generate(prompt, temperature=0.0)
-    # Strip potential <think>...</think> tags from reasoning models
-    translated = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    return translated
+    return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
+
+# ---------------------------------------------------------------------------
+# AI analysis → HTML cards conversion
+# ---------------------------------------------------------------------------
+
+def _inline_md(s: str) -> str:
+    """Convert inline Markdown (bold/italic/code) to HTML."""
+    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"\*(.+?)\*", r"<em>\1</em>", s)
+    s = re.sub(r"`(.+?)`", r"<code>\1</code>", s)
+    return s
+
+
+def _md_to_html(text: str) -> str:
+    """Convert simple Markdown to HTML for rendering inside HTML card divs."""
+    lines = text.split("\n")
+    parts: list[str] = []
+    list_items: list[str] = []
+
+    def flush_list() -> None:
+        if list_items:
+            parts.append(
+                '<ul style="margin:4px 0 8px;padding-left:18px;line-height:1.7">'
+            )
+            for item in list_items:
+                parts.append(f"<li>{item}</li>")
+            parts.append("</ul>")
+            list_items.clear()
+
+    for line in lines:
+        s = line.strip()
+        if s.startswith("- ") or s.startswith("* "):
+            list_items.append(_inline_md(s[2:]))
+        elif s.startswith("> "):
+            flush_list()
+            parts.append(
+                f'<blockquote style="margin:4px 8px;padding:2px 8px;'
+                f'border-left:3px solid #555;color:#aaa">{_inline_md(s[2:])}</blockquote>'
+            )
+        elif s == "":
+            flush_list()
+        else:
+            flush_list()
+            parts.append(f'<p style="margin:4px 0 6px">{_inline_md(s)}</p>')
+
+    flush_list()
+    return "".join(parts)
+
+
+def _ai_to_cards(raw: str) -> str:
+    """Convert LLM analysis text (Markdown with ### sections) to HTML cards.
+
+    Splits on ### headings produced by the structured system prompt.
+    Falls back to a single wide card if no headings are found.
+    """
+    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    if not text:
+        return ""
+
+    # Split on ### headings
+    sections = re.split(r"\n(?=### )", "\n" + text)
+    sections = [s.strip() for s in sections if s.strip()]
+
+    cards: list[str] = []
+    for section in sections:
+        m = re.match(r"### (.+?)\n(.*)", section, re.DOTALL)
+        if m:
+            title = m.group(1).strip()
+            content = _md_to_html(m.group(2).strip())
+        else:
+            title = "AI アシスタントの分析"
+            content = _md_to_html(section)
+        cards.append(
+            f'<div class="rpt-card rpt-wide">'
+            f'<h3 class="rpt-h3">{title}</h3>'
+            f"{content}"
+            f"</div>"
+        )
+
+    if not cards:
+        return ""
+
+    note = (
+        '<p style="color:#888;font-size:0.82em;margin:0 0 10px">'
+        "※ 以下は AI による情報提供です。投資助言ではありません。</p>"
+    )
+    return note + '<div class="rpt-cards">' + "".join(cards) + "</div>"
+
+
+# ---------------------------------------------------------------------------
+# Tab builder
+# ---------------------------------------------------------------------------
 
 def build_report_tab(yahoo_client, llm_client) -> None:
     """Build the stock report tab."""
@@ -74,33 +151,30 @@ def build_report_tab(yahoo_client, llm_client) -> None:
 
     resolved_md = gr.Markdown(visible=False)
 
-    # Three-column report layout
-    with gr.Row():
-        with gr.Column(scale=3):
-            left_output = gr.Markdown(
-                "*ティッカーまたは会社名を入力して実行してください。*"
-            )
-        with gr.Column(scale=2):
-            mid_output = gr.Markdown("")
-        with gr.Column(scale=2):
-            right_output = gr.Markdown("")
+    # Main report: header (title + score) + financial cards
+    main_output = gr.Markdown(
+        "*ティッカーまたは会社名を入力して実行してください。*"
+    )
+
+    # AI analysis section: rendered after full response is received
+    ai_output = gr.Markdown("")
 
     generator = ReportGenerator(yahoo_client, llm_client)
 
     def on_run(query: str):
         query = query.strip()
         if not query:
-            yield gr.update(visible=False), "ティッカーまたは会社名を入力してください。", "", ""
+            yield gr.update(visible=False), "ティッカーまたは会社名を入力してください。", ""
             return
 
-        yield gr.update(visible=False), "データを取得中...", "", ""
+        yield gr.update(visible=False), "データを取得中...", ""
 
         # --- Ticker resolution ---
         if _looks_like_ticker(query):
             ticker, norm_note = _normalize_ticker(query)
             if norm_note:
                 resolved_note = gr.update(value=f"**{norm_note}**", visible=True)
-                yield resolved_note, "データを取得中...", "", ""
+                yield resolved_note, "データを取得中...", ""
             else:
                 resolved_note = gr.update(visible=False)
         else:
@@ -110,7 +184,7 @@ def build_report_tab(yahoo_client, llm_client) -> None:
 
             if is_japanese:
                 if llm_client.is_available():
-                    yield gr.update(visible=False), f"「{query}」を検索中...", "", ""
+                    yield gr.update(visible=False), f"「{query}」を検索中...", ""
                     english_name = _llm_translate_to_english(query, llm_client)
                     if english_name:
                         search_query = english_name
@@ -119,7 +193,7 @@ def build_report_tab(yahoo_client, llm_client) -> None:
                     yield gr.update(visible=False), (
                         f"「{query}」は日本語の会社名のようですが、LLM が未読み込みのため英語変換できません。"
                         "ティッカー記号 (例: 7011.T) を直接入力してください。"
-                    ), "", ""
+                    ), ""
                     return
 
             candidates = yahoo_client.search_tickers(
@@ -129,33 +203,37 @@ def build_report_tab(yahoo_client, llm_client) -> None:
                 yield gr.update(visible=False), (
                     f"「{query}」に対応するティッカーが見つかりませんでした。"
                     "ティッカー記号を直接入力してください。"
-                ), "", ""
+                ), ""
                 return
 
             ticker = candidates[0]
             info = yahoo_client.get_ticker_info(ticker)
             display_name = info.get("longName") or info.get("shortName") or ticker
+            if ticker.endswith(".T"):
+                localized = yahoo_client.get_localized_names([ticker], lang="ja-JP", region="JP")
+                display_name = localized.get(ticker) or display_name
 
-            note_lines = [f"**「{query}」→ `{ticker}` ({display_name}){translation_note} として検索します**"]
+            note_lines = [
+                f"**「{query}」→ `{ticker}` ({display_name}){translation_note} として検索します**"
+            ]
             if len(candidates) > 1:
                 others = "、".join(f"`{c}`" for c in candidates[1:])
                 note_lines.append(f"他の候補: {others}")
 
             resolved_note = gr.update(value="\n\n".join(note_lines), visible=True)
-            yield resolved_note, "データを取得中...", "", ""
+            yield resolved_note, "データを取得中...", ""
 
-        # Generate report data without LLM (stream AI analysis into right column)
+        # Generate static report
         data = generator.generate(ticker, skip_llm=True)
-        left_md, mid_md, right_md = generator.format_columns(data)
+        main_html = generator.format_report_html(data)
 
         if data.get("error"):
-            yield gr.update(visible=False), left_md, "", ""
+            yield gr.update(visible=False), main_html, ""
             return
 
-        # Show static report first; right column starts with news only
-        yield resolved_note, left_md, mid_md, right_md
+        # Show financial cards immediately
+        yield resolved_note, main_html, ""
 
-        # Stream AI analysis into the right column (above news)
         if not llm_client.is_available():
             return
 
@@ -163,30 +241,28 @@ def build_report_tab(yahoo_client, llm_client) -> None:
         if not llm_input:
             return
 
-        # Separator between AI analysis and news
-        news_section = ("\n\n---\n\n" + right_md) if right_md.strip() else ""
+        # Show loading state while waiting for full AI response
+        yield (
+            gr.update(),
+            gr.update(),
+            '<p style="color:#888;font-style:italic">AI 分析中...</p>',
+        )
 
-        accumulated = ""
-        for chunk in llm_client.stream_analyze_stock(llm_input):
-            accumulated = chunk
-            # Use gr.update() for unchanged columns to avoid unnecessary re-renders
-            yield (
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                _AI_HEADER + accumulated + "▋" + news_section,
-            )
+        try:
+            raw = llm_client.analyze_stock(llm_input) or ""
+        except Exception:
+            raw = ""
 
-        if accumulated:
-            yield gr.update(), gr.update(), gr.update(), _AI_HEADER + accumulated + news_section
+        if raw:
+            yield gr.update(), gr.update(), _ai_to_cards(raw)
 
     run_btn.click(
         on_run,
         inputs=[ticker_input],
-        outputs=[resolved_md, left_output, mid_output, right_output],
+        outputs=[resolved_md, main_output, ai_output],
     )
     ticker_input.submit(
         on_run,
         inputs=[ticker_input],
-        outputs=[resolved_md, left_output, mid_output, right_output],
+        outputs=[resolved_md, main_output, ai_output],
     )

@@ -74,6 +74,30 @@ class PortfolioManager:
             writer = csv.DictWriter(f, fieldnames=_CSV_COLUMNS)
             writer.writerow(row)
 
+    def update_trades(self, df: pd.DataFrame) -> None:
+        """Overwrite the entire trade CSV with the given DataFrame.
+
+        Args:
+            df: DataFrame with columns matching _CSV_COLUMNS.
+        """
+        df = df[_CSV_COLUMNS] if all(c in df.columns for c in _CSV_COLUMNS) else df
+        df.to_csv(self.csv_path, index=False, encoding="utf-8")
+
+    def delete_trade(self, row_index: int) -> None:
+        """Delete a trade record by its 0-based row index.
+
+        Args:
+            row_index: 0-based index of the row to delete.
+
+        Raises:
+            IndexError: If row_index is out of range.
+        """
+        df = self.get_trades()
+        if row_index < 0 or row_index >= len(df):
+            raise IndexError(f"行番号 {row_index} は範囲外です (0–{len(df) - 1})")
+        df = df.drop(index=row_index).reset_index(drop=True)
+        df.to_csv(self.csv_path, index=False, encoding="utf-8")
+
     def get_trades(self) -> pd.DataFrame:
         """Return all trade records as a DataFrame.
 
@@ -154,13 +178,27 @@ class PortfolioManager:
             current_price / market_value / gain are None if price fetch fails.
         """
         positions = self.get_positions()
+        if not positions:
+            return []
+
+        # Batch-fetch localized (Japanese) names for .T tickers
+        jp_tickers = [t for t in positions if t.endswith(".T")]
+        localized_names: dict[str, str] = {}
+        if jp_tickers:
+            localized_names = yahoo_client.get_localized_names(jp_tickers, lang="ja-JP", region="JP")
+
         snapshot = []
         for ticker, pos in positions.items():
             info = yahoo_client.get_ticker_info(ticker)
             current_price: Optional[float] = (
                 info.get("currentPrice") or info.get("regularMarketPrice")
             )
-            name = info.get("longName") or info.get("shortName") or ticker
+            name = (
+                localized_names.get(ticker)
+                or info.get("longName")
+                or info.get("shortName")
+                or ticker
+            )
             qty = pos["quantity"]
             avg = pos["avg_price"]
             currency = pos["currency"]

@@ -12,7 +12,7 @@ from typing import Optional
 import pandas as pd
 
 from src.core.indicators import calculate_value_score, get_score_label
-from src.utils.formatter import fmt_market_cap
+from src.utils.formatter import fmt_market_cap, localize_sector
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def results_to_dataframe(results: list[ScreenResult]) -> pd.DataFrame:
             "配当利回り": _fmt_pct(r.dividend_yield),
             "ROE": _fmt_pct(r.roe),
             "売上成長率": _fmt_pct(r.revenue_growth),
-            "セクター": r.sector or "-",
+            "セクター": localize_sector(r.sector),
             "時価総額": _fmt_market_cap(r.market_cap, r.currency),
         }
         for r in results
@@ -149,6 +149,27 @@ class QueryScreener:
         ]
         results.sort(key=lambda r: r.value_score, reverse=True)
         results = results[:limit]
+
+        # Enrich missing fields (sector, ROE, revenue growth) via parallel batch fetch.
+        # The screener API response does not include these fields; they require
+        # individual quoteSummary calls. Results are cached so only first run is slow.
+        enrich_tickers = [
+            r.ticker for r in results
+            if r.ticker and (r.roe is None or r.revenue_growth is None or r.sector is None)
+        ]
+        if enrich_tickers:
+            logger.info("QueryScreener: enriching %d tickers with ticker info", len(enrich_tickers))
+            batch = self.client.get_ticker_info_batch(enrich_tickers)
+            for r in results:
+                if r.ticker not in batch:
+                    continue
+                info = batch[r.ticker]
+                if r.roe is None:
+                    r.roe = info.get("returnOnEquity")
+                if r.revenue_growth is None:
+                    r.revenue_growth = info.get("revenueGrowth")
+                if r.sector is None:
+                    r.sector = info.get("sector")
 
         # Fetch localized names for supported regions
         locale_map = {

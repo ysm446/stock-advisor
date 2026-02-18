@@ -40,7 +40,19 @@ def build_portfolio_tab(yahoo_client) -> None:
                 notes_in = gr.Textbox(label="メモ (任意)", scale=2)
             record_btn = gr.Button("記録", variant="primary")
             record_status = gr.Markdown("")
-            trades_df = gr.DataFrame(label="売買記録一覧", interactive=False)
+
+            gr.Markdown(
+                "表のセルを直接クリックして編集できます。編集後は **変更を保存** を押してください。"
+                "行を削除するには、行を選択して Delete キーを押し、その後 **変更を保存** を押してください。"
+            )
+            trades_df = gr.DataFrame(
+                label="売買記録一覧",
+                interactive=True,
+                col_count=(7, "fixed"),
+                headers=["date", "action", "ticker", "quantity", "price", "currency", "notes"],
+            )
+            save_btn = gr.Button("変更を保存", variant="primary")
+            save_status = gr.Markdown("")
 
             def refresh_trades():
                 df = manager.get_trades()
@@ -66,11 +78,30 @@ def build_portfolio_tab(yahoo_client) -> None:
                     logger.exception("add_trade failed")
                     return f"エラー: {e}", refresh_trades()
 
+            def save_trades(df_data):
+                try:
+                    if df_data is None:
+                        return "保存するデータがありません。", refresh_trades()
+                    df = pd.DataFrame(df_data) if not isinstance(df_data, pd.DataFrame) else df_data
+                    # 空行を除去
+                    df = df.dropna(how="all").reset_index(drop=True)
+                    manager.update_trades(df)
+                    return f"{len(df)} 件を保存しました。", refresh_trades()
+                except Exception as e:
+                    logger.exception("save_trades failed")
+                    return f"エラー: {e}", refresh_trades()
+
             record_btn.click(
                 add_trade,
                 inputs=[action_dd, ticker_in, qty_in, price_in, currency_dd, notes_in],
                 outputs=[record_status, trades_df],
             )
+            save_btn.click(
+                save_trades,
+                inputs=[trades_df],
+                outputs=[save_status, trades_df],
+            )
+
             trades_df.value = refresh_trades()
 
         # ── 2. スナップショット ──────────────────────────────────────────
