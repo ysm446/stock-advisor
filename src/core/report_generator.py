@@ -24,12 +24,12 @@ _REC_LABELS: dict[str, str] = {
     "strongSell": "強気売り",
 }
 
-_COLOR_GOOD = "#67e8f9"   # cyan (good value)
-_COLOR_BAD  = "#f97316"   # orange (bad value)
+_COLOR_GOOD = "#34d399"   # emerald (good value)
+_COLOR_BAD  = "#fb7185"   # rose (bad value)
 
 
 def _colored(text: str, good: Optional[bool]) -> str:
-    """Wrap text in a colored HTML span. good=True→cyan, False→orange, None→plain."""
+    """Wrap text in a colored HTML span. good=True→emerald, False→rose, None→plain."""
     if good is True:
         return f'<span style="color:{_COLOR_GOOD}">{text}</span>'
     if good is False:

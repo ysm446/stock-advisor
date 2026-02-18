@@ -228,8 +228,9 @@ def fmt_price(price: Optional[float], currency: Optional[str] = None) -> str:
     """Format a price value."""
     if price is None:
         return "-"
-    symbol = "¥" if currency == "JPY" else "$"
-    return f"{symbol}{price:,.2f}"
+    if currency == "JPY":
+        return f"¥{price:,.0f}"
+    return f"${price:,.2f}"
 
 
 def markdown_table(headers: list[str], rows: list[list]) -> str:
